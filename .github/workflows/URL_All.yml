@@ -1,106 +1,84 @@
-name: ALL Laptop Crawler
+name: Crawl Vietnam laptops
 
 on:
-  schedule:
-    - cron: '0 2 * * 4'   # Thứ Năm 09:00 giờ VN (02:00 UTC)
-
   workflow_dispatch:
     inputs:
       sites:
-        description: 'Sites to crawl (space-separated, leave empty for all)'
+        description: "Sites, separated by spaces; leave blank for all"
         required: false
-        default: ''
+        default: ""
       delay:
-        description: 'Delay between requests (seconds)'
+        description: "Delay between requests in seconds"
         required: false
-        default: '1.5'
+        default: "1.0"
+  schedule:
+    - cron: "15 20 * * 0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vietnam-laptop-crawler
+  cancel-in-progress: false
 
 jobs:
   crawl:
     runs-on: ubuntu-latest
     timeout-minutes: 180
 
-    permissions:
-      contents: write   # Cần để push commit
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up Python 3.11
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          python-version: "3.12"
+          cache: pip
 
       - name: Install Python dependencies
         run: |
-          pip install --upgrade pip
-          pip install requests beautifulsoup4 lxml playwright
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Install Playwright Chromium
-        run: python -m playwright install chromium --with-deps
+      - name: Install Chromium and Linux dependencies
+        run: python -m playwright install --with-deps chromium
 
-      - name: Create output directory
-        run: mkdir -p output
-
-      - name: Run url crawler
+      - name: Run crawler
+        env:
+          INPUT_SITES: ${{ github.event.inputs.sites || '' }}
+          INPUT_DELAY: ${{ github.event.inputs.delay || '1.0' }}
         run: |
-          DELAY="${{ github.event.inputs.delay || '1.5' }}"
-          SITES="${{ github.event.inputs.sites }}"
-
-          if [ -n "$SITES" ]; then
-            echo "Running crawler for sites: $SITES"
-            python url_crawler.py --sites $SITES --delay $DELAY --output output/all_url.csv
+          mkdir -p output
+          if [ -n "$INPUT_SITES" ]; then
+            read -r -a SITE_ARGS <<< "$INPUT_SITES"
+            python vietnam_laptop_crawler.py \
+              --sites "${SITE_ARGS[@]}" \
+              --delay "$INPUT_DELAY" \
+              --output output/vietnam_laptops.csv \
+              --json
           else
-            echo "Running crawler for all sites"
-            python url_crawler.py --delay $DELAY --output output/all_url.csv
+            python vietnam_laptop_crawler.py \
+              --delay "$INPUT_DELAY" \
+              --output output/vietnam_laptops.csv \
+              --json
           fi
 
-      - name: Show result summary
+      - name: Show output summary
         if: always()
         run: |
-          if [ -f output/all_url.csv ]; then
-            COUNT=$(( $(wc -l < output/all_url.csv) - 1 ))
-            echo "✅ Crawl completed: $COUNT products"
-            echo "### 📊 Crawl Results" >> $GITHUB_STEP_SUMMARY
-            echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
-            echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
-            echo "| Total products | $COUNT |" >> $GITHUB_STEP_SUMMARY
-            echo "| Run date | $(date '+%Y-%m-%d %H:%M UTC') |" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "**Sample (first 5 rows):**" >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            head -6 output/all_url.csv >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ output/all_url.csv not found"
-            exit 1
+          ls -lah output || true
+          if [ -f output/vietnam_laptops.csv ]; then
+            echo "CSV rows including header: $(wc -l < output/vietnam_laptops.csv)"
           fi
 
-      - name: Upload CSV artifact
+      - name: Upload crawler results
+        if: always()
         uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: all_v2-${{ github.run_number }}
-          path: output/all_url.csv
+          name: vietnam-laptops-${{ github.run_number }}
+          path: |
+            output/vietnam_laptops.csv
+            output/vietnam_laptops.json
+          if-no-files-found: warn
           retention-days: 30
-
-      - name: Commit and push CSV to repo
-        if: success()
-        run: |
-          git config --global user.name "github-actions"
-          git config --global user.email "github-actions@github.com"
-
-          git add output/all_url.csv
-
-          # Chỉ commit nếu có thay đổi
-          if git diff --staged --quiet; then
-            echo "No changes to commit"
-          else
-            COUNT=$(( $(wc -l < output/all_url.csv) - 1 ))
-            git commit -m "🤖 Auto-crawl $(date '+%Y-%m-%d'): ${COUNT} products"
-            git push origin main
-          fi
