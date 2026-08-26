@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Vietnam Laptop Crawler v3.6.1 - HACOM pagination fix.
+"""Vietnam Laptop Crawler v4.1 - GitHub Actions edition.
 
 Supported sites (12): gearvn, xgear, tinhocngoisao, hangchinhhieu,
 laptopnew, memoryzone, cellphones, hoanghamobile, laptopworld,
 laptop88, anphatpc, hacom.
 
-The output contains: site, name, url.
+Output columns: site, name, url.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ import random
 import re
 import time
 import unicodedata
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import requests
@@ -33,10 +33,11 @@ from urllib3.util.retry import Retry
 DELAY = 1.0
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
 ]
+
 LAPTOP_TERMS = (
     "laptop", "macbook", "notebook", "chromebook", "vivobook", "zenbook",
     "expertbook", "ideapad", "thinkpad", "thinkbook", "legion", " loq",
@@ -44,6 +45,7 @@ LAPTOP_TERMS = (
     "elitebook", "probook", "omnibook", "inspiron", "latitude", "vostro",
     "xps", "alienware", "katana", "cyborg", "stealth", "modern",
     "prestige", "aorus", "lg gram", "surface", "proart", "matebook",
+    "zephyrus", "rog flow", "tuf gaming", "omen", "surface pro",
 )
 EXCLUDE_TERMS = (
     "balo", "tui laptop", "de laptop", "gia do laptop", "sac laptop",
@@ -72,21 +74,21 @@ def clean(value) -> str:
 
 def fold(value) -> str:
     value = unicodedata.normalize("NFKD", clean(value).lower())
-    return "".join(c for c in value if not unicodedata.combining(c))
+    return "".join(char for char in value if not unicodedata.combining(char))
 
 
 def is_laptop(value) -> bool:
-    value = fold(value)
+    text = fold(value)
     return (
-        len(value) > 4
-        and any(term in value for term in LAPTOP_TERMS)
-        and not any(term in value for term in EXCLUDE_TERMS)
+        len(text) > 4
+        and any(term in text for term in LAPTOP_TERMS)
+        and not any(term in text for term in EXCLUDE_TERMS)
     )
 
 
 def canonical_url(url: str, base: str = "") -> str:
-    url = urljoin(base, clean(url))
-    parts = urlsplit(url)
+    absolute = urljoin(base, clean(url))
+    parts = urlsplit(absolute)
     if parts.scheme not in ("http", "https") or not parts.netloc:
         return ""
     path = re.sub(r"/{2,}", "/", parts.path).rstrip("/") or "/"
@@ -104,10 +106,18 @@ def deduplicate(rows: Iterable[dict]) -> list[dict]:
     return output
 
 
+def merge_rows(*groups: Sequence[dict]) -> list[dict]:
+    return deduplicate(row for group in groups for row in group)
+
+
 def build_session() -> requests.Session:
     session = requests.Session()
     retry = Retry(
-        total=4, connect=4, read=4, status=4, backoff_factor=1,
+        total=4,
+        connect=4,
+        read=4,
+        status=4,
+        backoff_factor=1,
         status_forcelist=(429, 500, 502, 503, 504),
         allowed_methods=frozenset(["GET"]),
         respect_retry_after_header=True,
@@ -125,8 +135,11 @@ def fetch(session, url: str, json_mode: bool = False, timeout: int = 40):
             headers={
                 "User-Agent": random.choice(USER_AGENTS),
                 "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.7",
-                "Accept": "application/json,*/*" if json_mode else
-                          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept": (
+                    "application/json,*/*" if json_mode
+                    else "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                ),
+                "Cache-Control": "no-cache",
             },
             timeout=timeout,
             allow_redirects=True,
@@ -138,19 +151,23 @@ def fetch(session, url: str, json_mode: bool = False, timeout: int = 40):
         return None
 
 
-def product_name(card, anchor) -> str:
-    if getattr(card, "select_one", None):
+def name_from_card(card, anchor) -> str:
+    if hasattr(card, "select_one"):
         for selector in NAME_SELECTORS:
             node = card.select_one(selector)
             if node:
-                name = clean(node.get_text(" "))
+                name = clean(node.get("title") or node.get_text(" "))
                 if name:
                     return name
     return clean(anchor.get("title") or anchor.get("aria-label") or anchor.get_text(" "))
 
 
-def extract_products(document: str, base: str, pattern: str | None = None,
-                     loose: bool = False) -> list[dict]:
+def extract_products(
+    document: str,
+    base: str,
+    pattern: str | None = None,
+    loose: bool = False,
+) -> list[dict]:
     soup = BeautifulSoup(document, "lxml")
     output, cards = [], []
     for selector in CARD_SELECTORS:
@@ -164,7 +181,7 @@ def extract_products(document: str, base: str, pattern: str | None = None,
             url = canonical_url(anchor.get("href", ""), base)
             if not url or (pattern and not re.search(pattern, url, re.I)):
                 continue
-            name = product_name(card, anchor)
+            name = name_from_card(card, anchor)
             if is_laptop(name):
                 output.append({"name": name, "url": url})
                 break
@@ -179,99 +196,80 @@ def extract_products(document: str, base: str, pattern: str | None = None,
     return deduplicate(output)
 
 
-def shopify_collection(base: str, collections: list[str], label: str) -> list[dict]:
+def shopify_collection(base: str, collections: Sequence[str], label: str) -> list[dict]:
     session = build_session()
     output, seen = [], set()
     for collection in collections:
-        for page in range(1, 201):
-            url = f"{base}/collections/{collection}/products.json?limit=250&page={page}"
+        for page_number in range(1, 301):
+            url = f"{base}/collections/{collection}/products.json?limit=250&page={page_number}"
             response = fetch(session, url, json_mode=True)
             if not response:
                 break
             try:
-                items = (response.json() or {}).get("products") or []
+                products = (response.json() or {}).get("products") or []
             except ValueError:
-                items = []
-            if not items:
+                products = []
+            if not products:
                 break
+
             new_count = 0
-            for item in items:
-                name = clean(item.get("title") or item.get("name"))
-                handle = clean(item.get("handle"))
-                url = canonical_url(item.get("url") or (f"/products/{handle}" if handle else ""), base)
-                key = str(item.get("id") or url)
-                if name and url and key not in seen and is_laptop(name):
+            for product in products:
+                name = clean(product.get("title") or product.get("name"))
+                handle = clean(product.get("handle"))
+                product_url = canonical_url(
+                    product.get("url") or (f"/products/{handle}" if handle else ""),
+                    base,
+                )
+                key = str(product.get("id") or product_url)
+                if name and product_url and key not in seen and is_laptop(name):
                     seen.add(key)
-                    output.append({"name": name, "url": url})
+                    output.append({"name": name, "url": product_url})
                     new_count += 1
-            log(label, f"JSON {collection} page={page} received={len(items)} new={new_count} total={len(output)}")
+
+            log(
+                label,
+                f"JSON {collection} page={page_number} received={len(products)} "
+                f"new={new_count} total={len(output)}",
+            )
             if new_count == 0:
                 break
             time.sleep(DELAY * 0.25)
     return deduplicate(output)
 
 
-def paged(label: str, base: str, starts: list[str], pattern: str,
-          params=("page",), loose=False, max_pages=100) -> list[dict]:
+def query_paged(
+    label: str,
+    base: str,
+    starts: Sequence[str],
+    pattern: str,
+    parameter: str = "page",
+    max_pages: int = 100,
+    loose: bool = True,
+) -> list[dict]:
     session = build_session()
     output, seen = [], set()
+
     for start in starts:
         repeated = 0
         for page_number in range(1, max_pages + 1):
-            page_urls = [start] if page_number == 1 else [
-                f"{start}{'&' if '?' in start else '?'}{param}={page_number}"
-                for param in params
-            ]
-            best = []
-            for page_url in page_urls:
-                response = fetch(session, page_url)
-                if response:
-                    rows = extract_products(response.text, base, pattern, loose)
-                    if len(rows) > len(best):
-                        best = rows
-            fresh = [row for row in best if row["url"] not in seen]
+            page_url = start if page_number == 1 else (
+                f"{start}{'&' if '?' in start else '?'}{parameter}={page_number}"
+            )
+            response = fetch(session, page_url)
+            if not response:
+                break
+            rows = extract_products(response.text, base, pattern, loose)
+            fresh = [row for row in rows if row["url"] not in seen]
             for row in fresh:
                 seen.add(row["url"])
                 output.append(row)
-            log(label, f"page={page_number} found={len(best)} new={len(fresh)} total={len(output)}")
-            if not best:
+            log(label, f"page={page_number} found={len(rows)} new={len(fresh)} total={len(output)}")
+            if not rows:
                 break
-            if not fresh:
-                repeated += 1
-                if repeated >= 2:
-                    break
-            else:
-                repeated = 0
-            time.sleep(DELAY)
-    return deduplicate(output)
-
-
-def path_paged(label: str, base: str, start_path: str, pattern: str,
-               loose=False, max_pages=100) -> list[dict]:
-    session = build_session()
-    output, seen = [], set()
-    repeated = 0
-    for page_number in range(1, max_pages + 1):
-        page_url = f"{base}{start_path}" if page_number == 1 else \
-                   f"{base}{start_path.rstrip('/')}/{page_number}/"
-        response = fetch(session, page_url)
-        if not response:
-            break
-        rows = extract_products(response.text, base, pattern, loose)
-        fresh = [row for row in rows if row["url"] not in seen]
-        for row in fresh:
-            seen.add(row["url"])
-            output.append(row)
-        log(label, f"page={page_number} found={len(rows)} new={len(fresh)} total={len(output)}")
-        if not rows:
-            break
-        if not fresh:
-            repeated += 1
+            repeated = repeated + 1 if not fresh else 0
             if repeated >= 2:
                 break
-        else:
-            repeated = 0
-        time.sleep(DELAY)
+            time.sleep(DELAY)
     return deduplicate(output)
 
 
@@ -281,14 +279,22 @@ def slug_name(url: str) -> str:
     return clean(slug.replace("-", " ").replace("_", " "))
 
 
-def sitemap_products(label: str, base: str, include: list[str], exclude=(),
-                     max_sitemaps=100) -> list[dict]:
+def sitemap_products(
+    label: str,
+    base: str,
+    include: Sequence[str],
+    exclude: Sequence[str] = (),
+    max_sitemaps: int = 150,
+) -> list[dict]:
     session = build_session()
     queue = [
-        f"{base}/sitemap.xml", f"{base}/sitemap_index.xml",
-        f"{base}/sitemap-product.xml", f"{base}/sitemap_product.xml",
+        f"{base}/sitemap.xml",
+        f"{base}/sitemap_index.xml",
+        f"{base}/sitemap-product.xml",
+        f"{base}/sitemap_product.xml",
     ]
     visited, urls = set(), set()
+
     while queue and len(visited) < max_sitemaps:
         sitemap_url = queue.pop(0)
         if sitemap_url in visited:
@@ -312,16 +318,23 @@ def sitemap_products(label: str, base: str, include: list[str], exclude=(),
             if "sitemap" in path and path.endswith((".xml", ".xml.gz")):
                 if url not in visited and url not in queue:
                     queue.append(url)
-            elif any(re.search(rule, url, re.I) for rule in include) and not any(
+                continue
+            if any(re.search(rule, url, re.I) for rule in include) and not any(
                 re.search(rule, url, re.I) for rule in exclude
             ):
                 urls.add(url)
         log(label, f"sitemap={len(visited)} products={len(urls)}")
+
     return deduplicate({"name": slug_name(url), "url": url} for url in sorted(urls))
 
 
-async def rendered(label: str, base: str, starts: list[str], pattern: str,
-                   loose=False, max_rounds=100) -> list[dict]:
+async def rendered(
+    label: str,
+    base: str,
+    starts: Sequence[str],
+    pattern: str,
+    max_rounds: int = 120,
+) -> list[dict]:
     try:
         from playwright.async_api import async_playwright
     except ImportError:
@@ -331,16 +344,14 @@ async def rendered(label: str, base: str, starts: list[str], pattern: str,
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage",
-                  "--disable-blink-features=AutomationControlled"],
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"],
         )
         context = await browser.new_context(
-            user_agent=random.choice(USER_AGENTS), locale="vi-VN",
+            user_agent=random.choice(USER_AGENTS),
+            locale="vi-VN",
             viewport={"width": 1440, "height": 1000},
         )
-        await context.add_init_script(
-            "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
-        )
+        await context.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
         page = await context.new_page()
 
         for start in starts:
@@ -348,14 +359,14 @@ async def rendered(label: str, base: str, starts: list[str], pattern: str,
                 await page.goto(start, wait_until="domcontentloaded", timeout=50000)
                 await page.wait_for_timeout(3000)
             except Exception as exc:
-                log(label, f"NAV {exc}")
+                log(label, f"NAV {start} {exc}")
                 continue
 
             stale = 0
             for round_number in range(max_rounds):
                 await page.evaluate("window.scrollTo(0,document.body.scrollHeight)")
                 await page.wait_for_timeout(1300)
-                rows = extract_products(await page.content(), base, pattern, loose)
+                rows = extract_products(await page.content(), base, pattern, True)
                 fresh = [row for row in rows if row["url"] not in seen]
                 for row in fresh:
                     seen.add(row["url"])
@@ -388,95 +399,42 @@ async def rendered(label: str, base: str, starts: list[str], pattern: str,
     return deduplicate(output)
 
 
-# Site crawlers ---------------------------------------------------------------
+# GEARVN ----------------------------------------------------------------------
 
-def crawl_gearvn(no_playwright=False):
+def gearvn_sitemap_laptops() -> list[dict]:
+    rows = sitemap_products(
+        "GEARVN",
+        "https://gearvn.com",
+        include=[r"gearvn\.com/products/[a-z0-9-]+$"],
+    )
+    return [row for row in rows if is_laptop(row["name"])]
+
+
+def crawl_gearvn(no_playwright: bool = False) -> list[dict]:
     base = "https://gearvn.com"
-    starts = [f"{base}/collections/laptop", f"{base}/collections/laptop-gaming-ban-chay"]
-    pattern = r"gearvn\.com/products/[a-z0-9-]+$"
-    rows = paged("GEARVN", base, starts, pattern, params=("page",), loose=True, max_pages=50)
-    return rows or ([] if no_playwright else asyncio.run(
-        rendered("GEARVN", base, starts, pattern, loose=True)
-    ))
-
-
-def crawl_laptopnew(_no_playwright=False):
-    base = "https://laptopnew.vn"
-    rows = shopify_collection(base, ["laptop-gaming", "laptop-van-phong", "laptop"], "LAPTOPNEW")
-    return rows or paged(
-        "LAPTOPNEW", base,
-        [f"{base}/collections/laptop-gaming", f"{base}/collections/laptop-van-phong"],
-        r"laptopnew\.vn/(?:products/)?[a-z0-9-]+$", loose=True,
-    )
-
-
-def crawl_cellphones(no_playwright=False):
-    base = "https://cellphones.com.vn"
-    starts = [
-        f"{base}/laptop.html", f"{base}/laptop/van-phong.html",
-        f"{base}/laptop/gaming.html", f"{base}/laptop/do-hoa.html",
-        f"{base}/laptop/sinh-vien.html", f"{base}/laptop/mong-nhe.html",
-        f"{base}/laptop/asus.html", f"{base}/laptop/acer.html",
-        f"{base}/laptop/dell.html", f"{base}/laptop/hp.html",
-        f"{base}/laptop/lenovo.html", f"{base}/laptop/msi.html",
-        f"{base}/laptop/gigabyte.html", f"{base}/laptop/lg.html",
+    collections = [
+        "laptop", "laptop-gaming", "laptop-van-phong", "laptop-do-hoa",
+        "laptop-gaming-ban-chay", "laptop-asus", "laptop-acer", "laptop-dell",
+        "laptop-hp", "laptop-lenovo", "laptop-msi", "laptop-gigabyte",
+        "macbook",
     ]
-    pattern = r"cellphones\.com\.vn/(?!laptop(?:/|\.html$))[a-z0-9-/]+\.html$"
-    rows = [] if no_playwright else asyncio.run(
-        rendered("CELLPHONES", base, starts, pattern, loose=True, max_rounds=100)
+    starts = [f"{base}/collections/{collection}" for collection in collections]
+    pattern = r"gearvn\.com/products/[a-z0-9-]+$"
+
+    # GearVN commonly disables products.json, so HTML pagination is the primary source.
+    page_rows = query_paged(
+        "GEARVN", base, starts, pattern,
+        parameter="page", max_pages=80, loose=True,
     )
-    map_rows = sitemap_products(
-        "CELLPHONES", base,
-        include=[r"cellphones\.com\.vn/(?:laptop|macbook)/[a-z0-9-]+\.html$"],
-        exclude=[r"/laptop/(?:asus|acer|dell|hp|lenovo|msi|gigabyte|lg|gaming|van-phong|do-hoa|sinh-vien|mong-nhe)\.html$"],
-    )
-    return deduplicate(rows + map_rows) or paged(
-        "CELLPHONES", base, starts, pattern, loose=True
-    )
+    sitemap_rows = gearvn_sitemap_laptops()
+    rendered_rows = []
+    if not no_playwright:
+        rendered_rows = asyncio.run(rendered("GEARVN", base, starts, pattern, 150))
+
+    return merge_rows(page_rows, sitemap_rows, rendered_rows)
 
 
-def crawl_laptopworld(_no_playwright=False):
-    base = "https://laptopworld.vn"
-    return paged(
-        "LAPTOPWORLD", base,
-        [f"{base}/laptop-van-phong.html", f"{base}/laptop-games-do-hoa.html"],
-        r"laptopworld\.vn/(?!laptop-(?:van-phong|games-do-hoa)\.html$)(?:[a-z0-9-]+/)*[a-z0-9-]+(?:\.html)?$",
-        params=("page",), loose=True,
-    )
-
-
-def crawl_laptop88(no_playwright=False):
-    base = "https://laptop88.vn"
-    starts = [f"{base}/may-tinh-xach-tay.html"]
-    pattern = r"laptop88\.vn/(?!may-tinh-xach-tay\.html$|tin-tuc/|khuyen-mai/|thuong-hieu/|nhu-cau/|phu-kien/)[a-z0-9][a-z0-9-/]+(?:\.html)?$"
-    rows = [] if no_playwright else asyncio.run(
-        rendered("LAPTOP88", base, starts, pattern, loose=True, max_rounds=100)
-    )
-    map_rows = sitemap_products(
-        "LAPTOP88", base,
-        include=[r"laptop88\.vn/(?:new-100-|laptop-)[a-z0-9-]+(?:\.html)?$"],
-        exclude=[r"/laptop-(?:asus|acer|dell|hp|lenovo|msi|gaming|van-phong)(?:\.html)?$"],
-    )
-    return deduplicate(rows + map_rows) or paged(
-        "LAPTOP88", base, starts, pattern, params=("page",), loose=True
-    )
-
-
-def crawl_anphatpc(_no_playwright=False):
-    base = "https://www.anphatpc.com.vn"
-    rows = paged(
-        "ANPHATPC", base,
-        [f"{base}/may-tinh-xach-tay-laptop.html", f"{base}/gaming-laptop.html", f"{base}/laptop-do-hoa.html"],
-        r"anphatpc\.com\.vn/(?!may-tinh-xach-tay-laptop\.html$|gaming-laptop\.html$|laptop-do-hoa\.html$)[a-z0-9-/]+\.html$",
-        params=("page",), loose=True, max_pages=100,
-    )
-    map_rows = sitemap_products(
-        "ANPHATPC", base,
-        include=[r"anphatpc\.com\.vn/[a-z0-9-]*(?:laptop|macbook)[a-z0-9-]*\.html$"],
-        exclude=[r"/(?:may-tinh-xach-tay-laptop|gaming-laptop|laptop-do-hoa|laptop-theo-hang)\.html$"],
-    )
-    return deduplicate(rows + map_rows)
-
+# HACOM -----------------------------------------------------------------------
 
 HACOM_CATEGORY_PATHS = {
     "/laptop", "/laptop-tablet-mobile", "/laptop-acer", "/laptop-asus",
@@ -491,57 +449,23 @@ def hacom_is_product_url(url: str) -> bool:
     parts = urlsplit(url)
     if parts.netloc.lower() not in {"hacom.vn", "www.hacom.vn"}:
         return False
-
     path = parts.path.rstrip("/").lower()
-    if not path or path in HACOM_CATEGORY_PATHS:
+    if not path or path in HACOM_CATEGORY_PATHS or re.fullmatch(r"/laptop/\d+", path):
         return False
-    if re.fullmatch(r"/laptop/\d+", path):
-        return False
-    if path.startswith((
-        "/tin-tuc", "/khuyen-mai", "/gio-hang", "/cart", "/search",
-        "/thuong-hieu", "/he-thong-showroom", "/chinh-sach",
-    )):
+    if path.startswith(("/tin-tuc", "/khuyen-mai", "/gio-hang", "/cart", "/search", "/thuong-hieu")):
         return False
     if not path.startswith("/laptop-"):
         return False
-
     slug = path.rsplit("/", 1)[-1]
     if slug in {item.lstrip("/") for item in HACOM_CATEGORY_PATHS}:
         return False
-
-    # Product slugs normally contain a model number. The length fallback keeps
-    # products whose model contains letters only while excluding short category slugs.
     return bool(re.search(r"\d", slug)) or len(slug) >= 28
 
 
-def hacom_card_name(card, anchor) -> str:
-    for selector in (
-        ".p-name", ".p-name a", ".product-name", ".product-title",
-        ".p-content h3", ".p-content h2", "h3", "h2",
-    ):
-        node = card.select_one(selector) if hasattr(card, "select_one") else None
-        if node:
-            name = clean(node.get("title") or node.get_text(" "))
-            if is_laptop(name):
-                return name
-
-    for candidate in (
-        anchor.get("title"),
-        anchor.get("aria-label"),
-        anchor.get_text(" "),
-    ):
-        name = clean(candidate)
-        if is_laptop(name):
-            return name
-    return ""
-
-
 def extract_hacom_products(document: str) -> list[dict]:
-    base = "https://hacom.vn"
     soup = BeautifulSoup(document, "lxml")
     output = []
     cards = []
-
     for selector in (
         ".p-item", ".p-container", ".product-item", ".product-card",
         ".product", "[data-id]", "[data-product-id]",
@@ -549,110 +473,63 @@ def extract_hacom_products(document: str) -> list[dict]:
     ):
         cards.extend(soup.select(selector))
 
-    # Structured product cards.
     for card in cards:
-        card_text = clean(card.get_text(" "))
         for anchor in card.select("a[href]"):
-            url = canonical_url(anchor.get("href", ""), base)
+            url = canonical_url(anchor.get("href", ""), "https://hacom.vn")
             if not hacom_is_product_url(url):
                 continue
-            name = hacom_card_name(card, anchor)
-            if not name and "Mã:" in card_text:
-                name = clean(anchor.get("title") or anchor.get_text(" "))
+            name = name_from_card(card, anchor)
             if is_laptop(name):
                 output.append({"name": name, "url": url})
                 break
 
-    # Loose URL pass in case HACOM changes card classes.
     for anchor in soup.select("a[href]"):
-        url = canonical_url(anchor.get("href", ""), base)
+        url = canonical_url(anchor.get("href", ""), "https://hacom.vn")
         if not hacom_is_product_url(url):
             continue
-        name = clean(
-            anchor.get("title")
-            or anchor.get("aria-label")
-            or anchor.get_text(" ")
-        )
+        name = clean(anchor.get("title") or anchor.get("aria-label") or anchor.get_text(" "))
         if not is_laptop(name):
             parent = anchor.find_parent(["article", "li", "div"])
             if parent:
-                name = hacom_card_name(parent, anchor)
+                name = name_from_card(parent, anchor)
         if is_laptop(name):
             output.append({"name": name, "url": url})
-
     return deduplicate(output)
 
 
-def hacom_page_candidates(page_number: int) -> list[str]:
-    base = "https://hacom.vn/laptop"
-    if page_number == 1:
-        return [base]
-    return [
-        f"{base}/{page_number}/",
-        f"{base}/{page_number}/?sort=new",
-        f"{base}?page={page_number}",
-    ]
-
-
-def crawl_hacom(_no_playwright=False):
-    """Crawl HACOM from the exact /laptop category and its path pages."""
+def crawl_hacom(_no_playwright: bool = False) -> list[dict]:
     session = build_session()
-    output = []
-    seen = set()
+    output, seen = [], set()
     empty_streak = 0
 
     for page_number in range(1, 121):
-        best_rows = []
-        best_fresh = []
-        best_url = ""
-
-        # HACOM officially exposes /laptop/N/ pages. The query variants are
-        # fallbacks because the site's pagination implementation has changed before.
-        for page_url in hacom_page_candidates(page_number):
+        urls = ["https://hacom.vn/laptop"] if page_number == 1 else [
+            f"https://hacom.vn/laptop/{page_number}/",
+            f"https://hacom.vn/laptop/{page_number}/?sort=new",
+            f"https://hacom.vn/laptop?page={page_number}",
+        ]
+        best_rows, best_fresh, best_url = [], [], ""
+        for page_url in urls:
             response = fetch(session, page_url, timeout=50)
             if not response:
                 continue
             rows = extract_hacom_products(response.text)
             fresh = [row for row in rows if row["url"] not in seen]
-            if len(fresh) > len(best_fresh) or (
-                len(fresh) == len(best_fresh) and len(rows) > len(best_rows)
-            ):
-                best_rows = rows
-                best_fresh = fresh
-                best_url = page_url
+            if len(fresh) > len(best_fresh) or (len(fresh) == len(best_fresh) and len(rows) > len(best_rows)):
+                best_rows, best_fresh, best_url = rows, fresh, page_url
 
         for row in best_fresh:
             seen.add(row["url"])
             output.append(row)
-
-        log(
-            "HACOM",
-            f"page={page_number} source={best_url or 'none'} "
-            f"found={len(best_rows)} new={len(best_fresh)} total={len(output)}",
-        )
-
+        log("HACOM", f"page={page_number} source={best_url or 'none'} found={len(best_rows)} new={len(best_fresh)} total={len(output)}")
         empty_streak = 0 if best_fresh else empty_streak + 1
-        if not best_rows and empty_streak >= 2:
-            break
-        if empty_streak >= 3:
+        if (not best_rows and empty_streak >= 2) or empty_streak >= 3:
             break
         time.sleep(DELAY)
 
-    # Brand pages are only a safety net. They may contain products not currently
-    # visible in the main ordering; URL deduplication prevents duplicates.
-    for brand_url in (
-        "https://hacom.vn/laptop-acer",
-        "https://hacom.vn/laptop-asus",
-        "https://hacom.vn/laptop-dell",
-        "https://hacom.vn/laptop-hp",
-        "https://hacom.vn/laptop-lenovo",
-        "https://hacom.vn/laptop-msi",
-        "https://hacom.vn/laptop-gigabyte",
-        "https://hacom.vn/laptop-lg",
-        "https://hacom.vn/laptop-apple",
-        "https://hacom.vn/laptop-microsoft-surface",
-    ):
-        response = fetch(session, brand_url, timeout=50)
+    for brand in ("acer", "asus", "dell", "hp", "lenovo", "msi", "gigabyte", "lg", "apple", "microsoft-surface"):
+        page_url = f"https://hacom.vn/laptop-{brand}"
+        response = fetch(session, page_url, timeout=50)
         if not response:
             continue
         rows = extract_hacom_products(response.text)
@@ -660,35 +537,79 @@ def crawl_hacom(_no_playwright=False):
         for row in fresh:
             seen.add(row["url"])
             output.append(row)
-        log(
-            "HACOM-BRAND",
-            f"source={brand_url} found={len(rows)} "
-            f"new={len(fresh)} total={len(output)}",
-        )
+        log("HACOM-BRAND", f"source={page_url} found={len(rows)} new={len(fresh)} total={len(output)}")
         time.sleep(DELAY)
-
     return deduplicate(output)
+
+
+# Remaining sites -------------------------------------------------------------
+
+def crawl_laptopnew(_no_playwright=False):
+    base = "https://laptopnew.vn"
+    return shopify_collection(base, ["laptop-gaming", "laptop-van-phong", "laptop"], "LAPTOPNEW") or query_paged(
+        "LAPTOPNEW", base,
+        [f"{base}/collections/laptop-gaming", f"{base}/collections/laptop-van-phong"],
+        r"laptopnew\.vn/(?:products/)?[a-z0-9-]+$",
+    )
+
+
+def crawl_cellphones(no_playwright=False):
+    base = "https://cellphones.com.vn"
+    starts = [f"{base}/laptop.html"] + [
+        f"{base}/laptop/{slug}.html" for slug in (
+            "van-phong", "gaming", "do-hoa", "sinh-vien", "mong-nhe",
+            "asus", "acer", "dell", "hp", "lenovo", "msi", "gigabyte", "lg",
+        )
+    ]
+    pattern = r"cellphones\.com\.vn/(?!laptop(?:/|\.html$))[a-z0-9-/]+\.html$"
+    render_rows = [] if no_playwright else asyncio.run(rendered("CELLPHONES", base, starts, pattern))
+    map_rows = sitemap_products(
+        "CELLPHONES", base,
+        [r"cellphones\.com\.vn/(?:laptop|macbook)/[a-z0-9-]+\.html$"],
+        [r"/laptop/(?:asus|acer|dell|hp|lenovo|msi|gigabyte|lg|gaming|van-phong|do-hoa|sinh-vien|mong-nhe)\.html$"],
+    )
+    return merge_rows(render_rows, map_rows) or query_paged("CELLPHONES", base, starts, pattern)
+
+
+def crawl_laptop88(no_playwright=False):
+    base = "https://laptop88.vn"
+    starts = [f"{base}/may-tinh-xach-tay.html"]
+    pattern = r"laptop88\.vn/(?!may-tinh-xach-tay\.html$|tin-tuc/|khuyen-mai/|thuong-hieu/|nhu-cau/|phu-kien/)[a-z0-9][a-z0-9-/]+(?:\.html)?$"
+    render_rows = [] if no_playwright else asyncio.run(rendered("LAPTOP88", base, starts, pattern))
+    map_rows = sitemap_products(
+        "LAPTOP88", base,
+        [r"laptop88\.vn/(?:new-100-|laptop-)[a-z0-9-]+(?:\.html)?$"],
+        [r"/laptop-(?:asus|acer|dell|hp|lenovo|msi|gaming|van-phong)(?:\.html)?$"],
+    )
+    return merge_rows(render_rows, map_rows) or query_paged("LAPTOP88", base, starts, pattern)
+
+
+def crawl_anphatpc(_no_playwright=False):
+    base = "https://www.anphatpc.com.vn"
+    starts = [f"{base}/may-tinh-xach-tay-laptop.html", f"{base}/gaming-laptop.html", f"{base}/laptop-do-hoa.html"]
+    pattern = r"anphatpc\.com\.vn/(?!may-tinh-xach-tay-laptop\.html$|gaming-laptop\.html$|laptop-do-hoa\.html$)[a-z0-9-/]+\.html$"
+    return query_paged("ANPHATPC", base, starts, pattern, max_pages=100)
 
 
 CRAWLERS = {
     "gearvn": crawl_gearvn,
     "xgear": lambda _n: shopify_collection("https://xgear.net", ["laptop"], "XGEAR"),
     "tinhocngoisao": lambda _n: shopify_collection("https://tinhocngoisao.com", ["laptop"], "TINHOCNGOISAO"),
-    "hangchinhhieu": lambda _n: shopify_collection(
-        "https://hangchinhhieu.vn", ["laptop", "laptop-gaming-do-hoa-studio"], "HANGCHINHHIEU"
-    ),
+    "hangchinhhieu": lambda _n: shopify_collection("https://hangchinhhieu.vn", ["laptop", "laptop-gaming-do-hoa-studio"], "HANGCHINHHIEU"),
     "laptopnew": crawl_laptopnew,
-    "memoryzone": lambda _n: shopify_collection("https://memoryzone.com.vn", ["laptop"], "MEMORYZONE") or paged(
-        "MEMORYZONE", "https://memoryzone.com.vn", ["https://memoryzone.com.vn/laptop"],
-        r"memoryzone\.com\.vn/(?:products/)?[a-z0-9-]+$", loose=True,
+    "memoryzone": lambda _n: shopify_collection("https://memoryzone.com.vn", ["laptop"], "MEMORYZONE") or query_paged(
+        "MEMORYZONE", "https://memoryzone.com.vn", ["https://memoryzone.com.vn/laptop"], r"memoryzone\.com\.vn/(?:products/)?[a-z0-9-]+$"
     ),
     "cellphones": crawl_cellphones,
-    "hoanghamobile": lambda _n: paged(
+    "hoanghamobile": lambda _n: query_paged(
         "HOANGHAMOBILE", "https://hoanghamobile.com", ["https://hoanghamobile.com/laptop"],
-        r"hoanghamobile\.com/laptop/(?!phan-loai-san-pham/)[a-z0-9-]+$",
-        params=("p",), loose=True,
+        r"hoanghamobile\.com/laptop/(?!phan-loai-san-pham/)[a-z0-9-]+$", parameter="p"
     ),
-    "laptopworld": crawl_laptopworld,
+    "laptopworld": lambda _n: query_paged(
+        "LAPTOPWORLD", "https://laptopworld.vn",
+        ["https://laptopworld.vn/laptop-van-phong.html", "https://laptopworld.vn/laptop-games-do-hoa.html"],
+        r"laptopworld\.vn/(?!laptop-(?:van-phong|games-do-hoa)\.html$)(?:[a-z0-9-]+/)*[a-z0-9-]+(?:\.html)?$"
+    ),
     "laptop88": crawl_laptop88,
     "anphatpc": crawl_anphatpc,
     "hacom": crawl_hacom,
@@ -703,9 +624,14 @@ def save_csv(rows: list[dict], path: str) -> None:
         writer.writerows(rows)
 
 
+def save_json(rows: list[dict], csv_path: str) -> None:
+    with open(os.path.splitext(csv_path)[0] + ".json", "w", encoding="utf-8") as file:
+        json.dump(rows, file, ensure_ascii=False, indent=2)
+
+
 def main() -> int:
     global DELAY
-    parser = argparse.ArgumentParser(description="Vietnam Laptop Crawler v3.6.1")
+    parser = argparse.ArgumentParser(description="Vietnam Laptop Crawler v4.1")
     parser.add_argument("--sites", nargs="+", choices=sorted(CRAWLERS))
     parser.add_argument("--output", default="vietnam_laptops.csv")
     parser.add_argument("--delay", type=float, default=1.0)
@@ -719,18 +645,16 @@ def main() -> int:
         try:
             rows = deduplicate(CRAWLERS[site](args.no_playwright))
         except KeyboardInterrupt:
+            log(site, "INTERRUPTED")
             break
         except Exception as exc:
             log(site, f"FATAL {exc}")
             rows = []
         all_rows.extend({"site": site, **row} for row in rows)
         save_csv(all_rows, args.output)
+        if args.json:
+            save_json(all_rows, args.output)
         log(site, f"SAVED {len(rows)}")
-
-    if args.json:
-        json_path = os.path.splitext(args.output)[0] + ".json"
-        with open(json_path, "w", encoding="utf-8") as file:
-            json.dump(all_rows, file, ensure_ascii=False, indent=2)
     return 0
 
 
