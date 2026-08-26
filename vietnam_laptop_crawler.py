@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Vietnam Laptop Crawler v3.3 - GitHub Actions edition.
+"""Vietnam Laptop Crawler v3.4 - GitHub Actions edition.
 
 12 supported sites. Five sites known to block GitHub-hosted runner IPs were removed.
 GEARVN v3.3 change: crawl collection pages directly with ?page=N first;
@@ -289,6 +289,47 @@ def paged(
     return deduplicate(output)
 
 
+def path_paged(label, base, start_path, pattern, loose=False, max_pages=100):
+    """Crawl sites whose pagination is /category/2/, /category/3/, etc."""
+    session = build_session()
+    output, seen = [], set()
+    repeated_pages = 0
+
+    for page_number in range(1, max_pages + 1):
+        if page_number == 1:
+            page_url = f"{base}{start_path}"
+        else:
+            page_url = f"{base}{start_path.rstrip('/')}/{page_number}/"
+
+        response = fetch(session, page_url)
+        if not response:
+            break
+
+        rows = extract_products(response.text, base, pattern, loose)
+        fresh = [row for row in rows if row["url"] not in seen]
+        for row in fresh:
+            seen.add(row["url"])
+            output.append(row)
+
+        print(
+            f"[{label}] page={page_number} found={len(rows)} "
+            f"new={len(fresh)} total={len(output)}",
+            flush=True,
+        )
+
+        if not rows:
+            break
+        if not fresh:
+            repeated_pages += 1
+            if repeated_pages >= 2:
+                break
+        else:
+            repeated_pages = 0
+        time.sleep(DELAY)
+
+    return deduplicate(output)
+
+
 async def rendered(label, base, starts, pattern, loose=False, max_rounds=80):
     try:
         from playwright.async_api import async_playwright
@@ -453,14 +494,18 @@ def crawl_cellphones(no_playwright=False):
     return rows or paged("CELLPHONES", base, starts, pattern, loose=True)
 
 
-def crawl_hacom(no_playwright=False):
+def crawl_hacom(_no_playwright=False):
+    # HACOM uses path pagination: /laptop/2/, /laptop/3/, ...
     base = "https://hacom.vn"
-    starts = [f"{base}/laptop", f"{base}/laptop-gaming-do-hoa"]
     pattern = r"hacom\.vn/laptop-(?!gaming-do-hoa$)[a-z0-9-]+$"
-    rows = [] if no_playwright else asyncio.run(
-        rendered("HACOM", base, starts, pattern, loose=True)
+    return path_paged(
+        label="HACOM",
+        base=base,
+        start_path="/laptop",
+        pattern=pattern,
+        loose=True,
+        max_pages=60,
     )
-    return rows or paged("HACOM", base, [starts[0]], pattern, loose=True)
 
 
 CRAWLERS = {
@@ -494,9 +539,15 @@ CRAWLERS = {
     "laptop88": crawl_laptop88,
     "anphatpc": lambda _n: paged(
         "ANPHATPC", "https://www.anphatpc.com.vn",
-        ["https://www.anphatpc.com.vn/laptop.html"],
-        r"anphatpc\.com\.vn/(?!laptop\.html$)[a-z0-9-/]+\.html$",
+        [
+            "https://www.anphatpc.com.vn/may-tinh-xach-tay-laptop.html",
+            "https://www.anphatpc.com.vn/gaming-laptop.html",
+            "https://www.anphatpc.com.vn/laptop-do-hoa.html",
+        ],
+        r"anphatpc\.com\.vn/(?!may-tinh-xach-tay-laptop\.html$|gaming-laptop\.html$|laptop-do-hoa\.html$)[a-z0-9-/]+\.html$",
+        params=("page",),
         loose=True,
+        max_pages=100,
     ),
     "hacom": crawl_hacom,
 }
@@ -512,7 +563,7 @@ def save_csv(rows, path):
 
 def main():
     global DELAY
-    parser = argparse.ArgumentParser(description="Vietnam Laptop Crawler v3.3")
+    parser = argparse.ArgumentParser(description="Vietnam Laptop Crawler v3.4")
     parser.add_argument("--sites", nargs="+", choices=sorted(CRAWLERS))
     parser.add_argument("--output", default="vietnam_laptops.csv")
     parser.add_argument("--delay", type=float, default=1.0)
