@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Vietnam Laptop Crawler v3.6 - GitHub Actions edition.
+"""Vietnam Laptop Crawler v3.6.1 - HACOM pagination fix.
 
 Supported sites (12): gearvn, xgear, tinhocngoisao, hangchinhhieu,
 laptopnew, memoryzone, cellphones, hoanghamobile, laptopworld,
@@ -478,33 +478,196 @@ def crawl_anphatpc(_no_playwright=False):
     return deduplicate(rows + map_rows)
 
 
-def crawl_hacom(_no_playwright=False):
+HACOM_CATEGORY_PATHS = {
+    "/laptop", "/laptop-tablet-mobile", "/laptop-acer", "/laptop-asus",
+    "/laptop-dell", "/laptop-hp", "/laptop-lenovo", "/laptop-msi",
+    "/laptop-gigabyte", "/laptop-lg", "/laptop-apple",
+    "/laptop-microsoft-surface", "/laptop-gaming", "/laptop-do-hoa",
+    "/laptop-van-phong", "/laptop-mong-nhe",
+}
+
+
+def hacom_is_product_url(url: str) -> bool:
+    parts = urlsplit(url)
+    if parts.netloc.lower() not in {"hacom.vn", "www.hacom.vn"}:
+        return False
+
+    path = parts.path.rstrip("/").lower()
+    if not path or path in HACOM_CATEGORY_PATHS:
+        return False
+    if re.fullmatch(r"/laptop/\d+", path):
+        return False
+    if path.startswith((
+        "/tin-tuc", "/khuyen-mai", "/gio-hang", "/cart", "/search",
+        "/thuong-hieu", "/he-thong-showroom", "/chinh-sach",
+    )):
+        return False
+    if not path.startswith("/laptop-"):
+        return False
+
+    slug = path.rsplit("/", 1)[-1]
+    if slug in {item.lstrip("/") for item in HACOM_CATEGORY_PATHS}:
+        return False
+
+    # Product slugs normally contain a model number. The length fallback keeps
+    # products whose model contains letters only while excluding short category slugs.
+    return bool(re.search(r"\d", slug)) or len(slug) >= 28
+
+
+def hacom_card_name(card, anchor) -> str:
+    for selector in (
+        ".p-name", ".p-name a", ".product-name", ".product-title",
+        ".p-content h3", ".p-content h2", "h3", "h2",
+    ):
+        node = card.select_one(selector) if hasattr(card, "select_one") else None
+        if node:
+            name = clean(node.get("title") or node.get_text(" "))
+            if is_laptop(name):
+                return name
+
+    for candidate in (
+        anchor.get("title"),
+        anchor.get("aria-label"),
+        anchor.get_text(" "),
+    ):
+        name = clean(candidate)
+        if is_laptop(name):
+            return name
+    return ""
+
+
+def extract_hacom_products(document: str) -> list[dict]:
     base = "https://hacom.vn"
-    pattern = r"hacom\.vn/laptop-(?!gaming-do-hoa$)[a-z0-9-]+$"
-    category_rows = path_paged(
-        "HACOM", base, "/laptop", pattern, loose=True, max_pages=80
-    )
-    brand_starts = [
-        f"{base}/laptop-asus-vivobook", f"{base}/laptop-asus-zenbook",
-        f"{base}/laptop-asus-rog", f"{base}/laptop-asus-tuf",
-        f"{base}/laptop-dell-inspiron", f"{base}/laptop-dell-latitude",
-        f"{base}/laptop-dell-xps", f"{base}/laptop-hp-pavilion",
-        f"{base}/laptop-hp-victus", f"{base}/laptop-hp-elitebook",
-        f"{base}/laptop-lenovo-ideapad", f"{base}/laptop-lenovo-thinkpad",
-        f"{base}/laptop-lenovo-legion", f"{base}/laptop-lenovo-loq",
-        f"{base}/laptop-msi-gaming", f"{base}/laptop-msi-modern",
-        f"{base}/laptop-apple-macbook-air", f"{base}/laptop-apple-macbook-pro",
+    soup = BeautifulSoup(document, "lxml")
+    output = []
+    cards = []
+
+    for selector in (
+        ".p-item", ".p-container", ".product-item", ".product-card",
+        ".product", "[data-id]", "[data-product-id]",
+        "li[class*='product']", "div[class*='product-item']",
+    ):
+        cards.extend(soup.select(selector))
+
+    # Structured product cards.
+    for card in cards:
+        card_text = clean(card.get_text(" "))
+        for anchor in card.select("a[href]"):
+            url = canonical_url(anchor.get("href", ""), base)
+            if not hacom_is_product_url(url):
+                continue
+            name = hacom_card_name(card, anchor)
+            if not name and "Mã:" in card_text:
+                name = clean(anchor.get("title") or anchor.get_text(" "))
+            if is_laptop(name):
+                output.append({"name": name, "url": url})
+                break
+
+    # Loose URL pass in case HACOM changes card classes.
+    for anchor in soup.select("a[href]"):
+        url = canonical_url(anchor.get("href", ""), base)
+        if not hacom_is_product_url(url):
+            continue
+        name = clean(
+            anchor.get("title")
+            or anchor.get("aria-label")
+            or anchor.get_text(" ")
+        )
+        if not is_laptop(name):
+            parent = anchor.find_parent(["article", "li", "div"])
+            if parent:
+                name = hacom_card_name(parent, anchor)
+        if is_laptop(name):
+            output.append({"name": name, "url": url})
+
+    return deduplicate(output)
+
+
+def hacom_page_candidates(page_number: int) -> list[str]:
+    base = "https://hacom.vn/laptop"
+    if page_number == 1:
+        return [base]
+    return [
+        f"{base}/{page_number}/",
+        f"{base}/{page_number}/?sort=new",
+        f"{base}?page={page_number}",
     ]
-    brand_rows = paged(
-        "HACOM-BRANDS", base, brand_starts, pattern,
-        params=("page",), loose=True, max_pages=30,
-    )
-    map_rows = sitemap_products(
-        "HACOM", base,
-        include=[r"hacom\.vn/laptop-[a-z0-9-]+$"],
-        exclude=[r"/laptop-(?:gaming-do-hoa|ai|asus|acer|dell|hp|lenovo|msi|apple|lg)(?:-[a-z0-9-]+)?$"],
-    )
-    return deduplicate(category_rows + brand_rows + map_rows)
+
+
+def crawl_hacom(_no_playwright=False):
+    """Crawl HACOM from the exact /laptop category and its path pages."""
+    session = build_session()
+    output = []
+    seen = set()
+    empty_streak = 0
+
+    for page_number in range(1, 121):
+        best_rows = []
+        best_fresh = []
+        best_url = ""
+
+        # HACOM officially exposes /laptop/N/ pages. The query variants are
+        # fallbacks because the site's pagination implementation has changed before.
+        for page_url in hacom_page_candidates(page_number):
+            response = fetch(session, page_url, timeout=50)
+            if not response:
+                continue
+            rows = extract_hacom_products(response.text)
+            fresh = [row for row in rows if row["url"] not in seen]
+            if len(fresh) > len(best_fresh) or (
+                len(fresh) == len(best_fresh) and len(rows) > len(best_rows)
+            ):
+                best_rows = rows
+                best_fresh = fresh
+                best_url = page_url
+
+        for row in best_fresh:
+            seen.add(row["url"])
+            output.append(row)
+
+        log(
+            "HACOM",
+            f"page={page_number} source={best_url or 'none'} "
+            f"found={len(best_rows)} new={len(best_fresh)} total={len(output)}",
+        )
+
+        empty_streak = 0 if best_fresh else empty_streak + 1
+        if not best_rows and empty_streak >= 2:
+            break
+        if empty_streak >= 3:
+            break
+        time.sleep(DELAY)
+
+    # Brand pages are only a safety net. They may contain products not currently
+    # visible in the main ordering; URL deduplication prevents duplicates.
+    for brand_url in (
+        "https://hacom.vn/laptop-acer",
+        "https://hacom.vn/laptop-asus",
+        "https://hacom.vn/laptop-dell",
+        "https://hacom.vn/laptop-hp",
+        "https://hacom.vn/laptop-lenovo",
+        "https://hacom.vn/laptop-msi",
+        "https://hacom.vn/laptop-gigabyte",
+        "https://hacom.vn/laptop-lg",
+        "https://hacom.vn/laptop-apple",
+        "https://hacom.vn/laptop-microsoft-surface",
+    ):
+        response = fetch(session, brand_url, timeout=50)
+        if not response:
+            continue
+        rows = extract_hacom_products(response.text)
+        fresh = [row for row in rows if row["url"] not in seen]
+        for row in fresh:
+            seen.add(row["url"])
+            output.append(row)
+        log(
+            "HACOM-BRAND",
+            f"source={brand_url} found={len(rows)} "
+            f"new={len(fresh)} total={len(output)}",
+        )
+        time.sleep(DELAY)
+
+    return deduplicate(output)
 
 
 CRAWLERS = {
@@ -542,7 +705,7 @@ def save_csv(rows: list[dict], path: str) -> None:
 
 def main() -> int:
     global DELAY
-    parser = argparse.ArgumentParser(description="Vietnam Laptop Crawler v3.6")
+    parser = argparse.ArgumentParser(description="Vietnam Laptop Crawler v3.6.1")
     parser.add_argument("--sites", nargs="+", choices=sorted(CRAWLERS))
     parser.add_argument("--output", default="vietnam_laptops.csv")
     parser.add_argument("--delay", type=float, default=1.0)
