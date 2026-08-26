@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       sites:
-        description: "Sites, separated by spaces; leave blank for all"
+        description: "Site names separated by spaces; blank = all 12"
         required: false
         default: ""
       delay:
@@ -15,7 +15,7 @@ on:
     - cron: "15 20 * * 0"
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: vietnam-laptop-crawler
@@ -24,11 +24,13 @@ concurrency:
 jobs:
   crawl:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 240
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -50,6 +52,7 @@ jobs:
           INPUT_DELAY: ${{ github.event.inputs.delay || '1.0' }}
         run: |
           mkdir -p output
+
           if [ -n "$INPUT_SITES" ]; then
             read -r -a SITE_ARGS <<< "$INPUT_SITES"
             python vietnam_laptop_crawler.py \
@@ -64,15 +67,31 @@ jobs:
               --json
           fi
 
-      - name: Show output summary
-        if: always()
+      - name: Verify generated files
         run: |
-          ls -lah output || true
-          if [ -f output/vietnam_laptops.csv ]; then
-            echo "CSV rows including header: $(wc -l < output/vietnam_laptops.csv)"
+          echo "Generated files:"
+          find output -maxdepth 2 -type f -print | sort
+          test -f output/vietnam_laptops.csv
+          test -f output/vietnam_laptops.json
+          echo "CSV rows including header:"
+          wc -l output/vietnam_laptops.csv
+
+      - name: Commit generated files to repository
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -f output/vietnam_laptops.csv
+          git add -f output/vietnam_laptops.json
+
+          if git diff --cached --quiet; then
+            echo "No output changes to commit"
+          else
+            git commit -m "Update laptop crawler results"
+            git push
           fi
 
-      - name: Upload crawler results
+      - name: Upload crawler results as artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -80,5 +99,5 @@ jobs:
           path: |
             output/vietnam_laptops.csv
             output/vietnam_laptops.json
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 30
